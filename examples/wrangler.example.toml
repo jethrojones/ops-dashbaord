@@ -1,0 +1,75 @@
+name = "ops-dashboard"
+main = "src/index.ts"
+compatibility_date = "2026-05-12"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+APP_DOMAIN = "ops.example.com"
+CF_TEAM_DOMAIN = "example-team"
+EMAIL_FROM = "ops@example.com"
+NOTIFY_EMAILS = ""
+GITHUB_REPO_OWNER = "example-owner"
+GITHUB_REPO_NAME = "ops-dashboard"
+GITHUB_WORKFLOWS_PATH = ".github/workflows"
+SCHEDULER_TZ = "America/New_York"
+FREE_WORKER_REQUESTS_DAY = "100000"
+FREE_D1_WRITES_DAY = "100000"
+FREE_KV_WRITES_DAY = "1000"
+FREE_QUEUE_OPS_DAY = "10000"
+FREE_R2_CLASS_A_MONTH = "1000000"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ops-dashboard"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "LOGS"
+bucket_name = "ops-dashboard-logs"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[[durable_objects.bindings]]
+name = "WORKFLOW_LOCK"
+class_name = "WorkflowLock"
+
+[[durable_objects.bindings]]
+name = "USAGE_COUNTER"
+class_name = "UsageCounter"
+
+[[durable_objects.bindings]]
+name = "WEBHOOK_DEDUP"
+class_name = "WebhookDedup"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WorkflowLock", "UsageCounter", "WebhookDedup"]
+
+[[queues.producers]]
+binding = "DISPATCH_QUEUE"
+queue = "ops-dashboard-dispatch"
+
+[[queues.consumers]]
+queue = "ops-dashboard-dispatch"
+max_batch_size = 1
+max_batch_timeout = 5
+max_retries = 1
+
+[triggers]
+crons = ["*/1 * * * *"]
+
+# Required Worker Secrets. Set each with:
+#   npx wrangler secret put SECRET_NAME
+#
+# OPS_SECRETS_MASTER_KEY
+# CF_ACCESS_AUD
+# EMAIL_PROVIDER_API_KEY
+# GITHUB_APP_PRIVATE_KEY
+# GITHUB_APP_ID
+# GITHUB_INSTALLATION_ID
+#
+# Optional fallback if not using a GitHub App:
+# GITHUB_TOKEN
