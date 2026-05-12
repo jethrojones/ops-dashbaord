@@ -1,0 +1,28 @@
+{
+  "name": "ops-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:migrate:local": "wrangler d1 migrations apply ops-dashboard --local",
+    "db:migrate:remote": "wrangler d1 migrations apply ops-dashboard --remote",
+    "scan:secrets": "bash scripts/scan-secrets.sh .",
+    "cf:types": "wrangler types"
+  },
+  "dependencies": {
+    "hono": "4.7.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20241224.0",
+    "@types/node": "22.10.2",
+    "@vitest/coverage-v8": "2.1.0",
+    "typescript": "5.6.3",
+    "vitest": "2.1.8",
+    "wrangler": "4.87.0"
+  }
+}

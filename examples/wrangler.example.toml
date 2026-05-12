@@ -1,6 +1,12 @@
 name = "ops-dashboard"
 main = "src/index.ts"
+# Pin this deliberately. For new projects, check Cloudflare's current recommendation
+# and bump only after running the test suite against the newer runtime behavior.
 compatibility_date = "2026-05-12"
+
+# Hono itself does not require Node.js APIs, but common auth/JWT/GitHub/email
+# libraries often import node:crypto, node:buffer, or node:stream. Remove this
+# flag if the final dependency set is Workers-native and tests still pass.
 compatibility_flags = ["nodejs_compat"]
 
 [vars]
@@ -52,13 +58,20 @@ new_sqlite_classes = ["WorkflowLock", "UsageCounter", "WebhookDedup"]
 binding = "DISPATCH_QUEUE"
 queue = "ops-dashboard-dispatch"
 
+[[queues.producers]]
+binding = "DISPATCH_DLQ"
+queue = "ops-dashboard-dispatch-dlq"
+
 [[queues.consumers]]
 queue = "ops-dashboard-dispatch"
 max_batch_size = 1
 max_batch_timeout = 5
-max_retries = 1
+max_retries = 0
+dead_letter_queue = "ops-dashboard-dispatch-dlq"
 
 [triggers]
+# Every minute is the practical floor for near-real-time scheduling. Raise this
+# to "*/5 * * * *" or slower if workflows do not need one-minute resolution.
 crons = ["*/1 * * * *"]
 
 # Required Worker Secrets. Set each with:

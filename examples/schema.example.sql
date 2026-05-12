@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS runs (
   started_at TEXT NOT NULL,
   ended_at TEXT,
   duration_ms INTEGER,
-  error_category TEXT CHECK (error_category IN ('auth', 'rate_limit', 'network', 'schema', 'timeout', 'unknown', NULL)),
+  error_category TEXT CHECK (error_category IN ('auth', 'rate_limit', 'network', 'schema', 'timeout', 'unknown')),
   error_summary TEXT,
   log_r2_key TEXT,
   version_sha TEXT,
@@ -38,7 +38,11 @@ CREATE TABLE IF NOT EXISTS runs (
 
 CREATE TABLE IF NOT EXISTS secrets (
   service TEXT PRIMARY KEY,
+  -- Store AES-GCM ciphertext as base64. Store the random 96-bit IV/nonce
+  -- separately so every encryption operation uses a unique nonce.
   encrypted_blob TEXT NOT NULL,
+  encryption_iv TEXT NOT NULL,
+  encryption_version INTEGER NOT NULL DEFAULT 1,
   status TEXT NOT NULL DEFAULT 'unknown' CHECK (status IN ('unknown', 'healthy', 'failing', 'disabled')),
   last_checked_at TEXT,
   last_rotated_at TEXT,
@@ -57,6 +61,10 @@ CREATE TABLE IF NOT EXISTS webhook_events (
   routing_decision TEXT NOT NULL CHECK (routing_decision IN ('routed', 'skipped', 'rejected', 'duplicate')),
   payload_r2_key TEXT
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_unique_delivery
+  ON webhook_events(service, delivery_id)
+  WHERE delivery_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS audit_log (
   id TEXT PRIMARY KEY,
@@ -88,8 +96,18 @@ CREATE TABLE IF NOT EXISTS deploy_jobs (
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
+  created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   updated_by TEXT
+);
+
+CREATE TABLE IF NOT EXISTS settings_history (
+  id TEXT PRIMARY KEY,
+  key TEXT NOT NULL,
+  previous_value TEXT,
+  next_value TEXT NOT NULL,
+  changed_by TEXT,
+  created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_script_id ON runs(script_id);
@@ -97,5 +115,8 @@ CREATE INDEX IF NOT EXISTS idx_runs_started_at ON runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 CREATE INDEX IF NOT EXISTS idx_webhook_service ON webhook_events(service, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_webhook_delivery ON webhook_events(service, delivery_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_run_id ON webhook_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_log(resource_type, resource_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deploy_script ON deploy_jobs(script_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_settings_history_key ON settings_history(key, created_at DESC);

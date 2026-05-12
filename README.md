@@ -45,9 +45,13 @@ Do not hard-code private organization names, personal emails, domains, account i
 
 - [README.md](README.md): the full build and setup guide.
 - [docs/llm-build-prompt.md](docs/llm-build-prompt.md): a one-shot prompt someone can give to an LLM coding agent.
-- [glassline.md](glassline.md): the tweakable starting design system.
+- [glassline.md](glassline.md): the tweakable starting design system with a YAML token block.
 - [examples/wrangler.example.toml](examples/wrangler.example.toml): sanitized Cloudflare configuration.
 - [examples/schema.example.sql](examples/schema.example.sql): starter D1 schema.
+- [examples/package.example.json](examples/package.example.json): starter Node package scripts and dependency pins.
+- [examples/tsconfig.example.json](examples/tsconfig.example.json): starter TypeScript config for Workers.
+- [examples/ci.example.yml](examples/ci.example.yml): starter GitHub Actions workflow.
+- [scripts/scan-secrets.sh](scripts/scan-secrets.sh): reusable high-confidence secret pattern scan.
 - [.env.example](.env.example): local variable names only, with placeholder values.
 
 ## Design Input
@@ -151,8 +155,8 @@ Workers run the application, API routes, cron handler, and queue consumer. Use W
 Needed:
 
 - A Worker service name, for example `ops-dashboard`.
-- A compatibility date.
-- `nodejs_compat` only if dependencies need Node-compatible APIs.
+- A compatibility date. Cloudflare recommends current dates for new projects; pin it deliberately and bump only after tests pass on the newer runtime behavior.
+- `nodejs_compat` only if dependencies need Node-compatible APIs. The example enables it because auth, JWT, GitHub, and email SDKs often import Node built-ins; remove it if the final dependency set is Workers-native.
 - Wrangler configured locally and authenticated to the target Cloudflare account.
 
 Common pitfalls:
@@ -161,6 +165,7 @@ Common pitfalls:
 - Worker CPU time is limited. Long or dependency-heavy jobs should dispatch to GitHub Actions, an external runner, or Cloudflare Workflows rather than run inline.
 - Dynamic script imports must be bundleable. Keep workflows inside known directories or use a registry map.
 - Do not put secrets in `wrangler.toml` under `[vars]`. Use Worker Secrets.
+- Run `npx wrangler types` after changing bindings so the generated Env type matches real Cloudflare configuration.
 
 ### D1
 
@@ -277,6 +282,7 @@ Queues decouple scheduling/webhooks from execution:
 
 ```bash
 npx wrangler queues create ops-dashboard-dispatch
+npx wrangler queues create ops-dashboard-dispatch-dlq
 ```
 
 Bind the same queue as a producer and consumer in the Worker. The scheduled handler and webhook routes publish messages; the queue handler executes them.
@@ -286,12 +292,14 @@ Why Queues:
 - HTTP requests and cron handlers stay fast.
 - Failed work is captured as a run record instead of disappearing in a request timeout.
 - Batching and retry settings are explicit.
+- A dead-letter queue preserves poison messages for inspection instead of deleting them permanently.
 
 Pitfalls:
 
-- Decide whether failed workflow execution should retry automatically. For many ops workflows, silent retries can duplicate side effects. A safer default is one attempt, log the failure, and let an operator rerun.
+- Decide whether failed workflow execution should retry automatically. For many ops workflows, silent retries can duplicate side effects. A safer default is `max_retries = 0`: one delivery attempt, log the failure, send to the DLQ if the consumer itself fails, and let an operator rerun.
 - Include an idempotency key in each message.
 - Keep payloads small. Put large payloads in R2 and pass the R2 key.
+- Add a DLQ consumer view or admin script so operators can inspect message ids, payload summaries, and failure timestamps.
 
 ### Cron Triggers
 
@@ -310,6 +318,7 @@ Why Cron Triggers:
 Pitfalls:
 
 - Cron expressions are UTC.
+- Every minute is the practical floor for near-real-time scheduling. Use `*/5 * * * *` or slower if workflows do not need one-minute resolution.
 - Cloudflare trigger changes can take several minutes to propagate.
 - If you use multiple cron expressions, inspect `controller.cron` to distinguish which fired.
 - A schedule with `next_run_at = NULL` should be treated as disabled or not yet initialized.
@@ -333,10 +342,44 @@ npx wrangler secret put CF_ACCESS_AUD
 Implementation requirements:
 
 - Verify Cloudflare Access JWTs server-side.
+- Read the token from `Cf-Access-Jwt-Assertion` first. Browser requests may also have `CF_Authorization`, but the header is the better server-side validation source.
+- Fetch signing keys from `https://<team-name>.cloudflareaccess.com/cdn-cgi/access/certs`.
+- Cache JWKS keys with a TTL and refetch on unknown `kid`; Access signing keys rotate.
 - Check issuer, audience, signature, and expiration.
 - Extract the user email and subject for audit logs.
 - Deny by default when headers are missing.
+- Never trust `Cf-Access-Authenticated-User-Email` unless the JWT has already been verified.
 - Do not protect `/webhooks/*` with Access; third-party services cannot complete browser login.
+
+Starter Access verification sketch:
+
+```ts
+type AccessClaims = {
+  aud: string | string[];
+  email?: string;
+  exp: number;
+  iss: string;
+  sub: string;
+};
+
+export async function requireAccess(request: Request, env: Env): Promise<AccessClaims> {
+  const token =
+    request.headers.get('Cf-Access-Jwt-Assertion') ??
+    parseCookie(request.headers.get('Cookie') ?? '').CF_Authorization;
+
+  if (!token) throw new Response('Unauthorized', { status: 401 });
+
+  const jwksUrl = `https://${env.CF_TEAM_DOMAIN}.cloudflareaccess.com/cdn-cgi/access/certs`;
+  const jwks = await getCachedJwks(jwksUrl);
+  const claims = await verifyJwtWithJwks<AccessClaims>(token, jwks, {
+    issuer: `https://${env.CF_TEAM_DOMAIN}.cloudflareaccess.com`,
+    audience: env.CF_ACCESS_AUD,
+  });
+
+  if (!claims.sub || !claims.email) throw new Response('Unauthorized', { status: 401 });
+  return claims;
+}
+```
 
 Pitfalls:
 
@@ -360,6 +403,16 @@ npx wrangler secret put EMAIL_PROVIDER_API_KEY
 
 Use the dashboard's encrypted secrets table for third-party service credentials that operators enter or rotate from the UI. Encrypt those values before writing to D1 using `OPS_SECRETS_MASTER_KEY`.
 
+Credential encryption envelope:
+
+- Use AES-GCM through Web Crypto.
+- Generate a fresh 96-bit random IV/nonce for every encryption operation.
+- Store ciphertext as base64 in `secrets.encrypted_blob`.
+- Store IV as base64 in `secrets.encryption_iv`.
+- Store an integer `encryption_version` so a future migration can rotate formats.
+- Put metadata such as `service`, `status`, `last_checked_at`, and `last_rotated_at` in cleartext columns.
+- Do not reuse an IV with the same key.
+
 Rules:
 
 - Never commit `.env`, `.dev.vars`, API keys, OAuth client secrets, private keys, webhook secrets, or service account JSON files.
@@ -379,6 +432,16 @@ Enable Worker logs and add structured application logs:
 - Every webhook receipt stores service, event type, signature validity, routing decision, and run id if routed.
 
 Add a footer or settings page that displays current Cloudflare resource usage and third-party quota warnings.
+
+## Rate Limits And Backoff
+
+Add rate limiting at three levels:
+
+- Webhook ingress: limit by source IP, service, and delivery id. A misconfigured sender should not be able to enqueue thousands of runs.
+- Operator actions: throttle manual runs and paste-back deploy attempts per user and workflow. Repeated clicks should collapse into one queued run or return a clear "already queued" response.
+- Outbound APIs: use exponential backoff with jitter for 429 and transient 5xx responses. Respect `Retry-After` when providers send it.
+
+Every workflow that writes to an external system should include an idempotency key derived from `run_id`, external object id, and action name.
 
 ## Example Cloudflare Setup Order
 
@@ -433,6 +496,7 @@ Cloudflare changes product limits, command options, and configuration details ov
 - D1 migrations: <https://developers.cloudflare.com/d1/reference/migrations/>
 - KV namespaces: <https://developers.cloudflare.com/kv/concepts/kv-namespaces/>
 - Queues configuration: <https://developers.cloudflare.com/queues/configuration/configure-queues/>
+- Queue dead-letter queues: <https://developers.cloudflare.com/queues/configuration/dead-letter-queues/>
 - Cron Triggers: <https://developers.cloudflare.com/workers/configuration/cron-triggers/>
 - Scheduled handlers: <https://developers.cloudflare.com/workers/runtime-apis/handlers/scheduled/>
 - Cloudflare Access: <https://developers.cloudflare.com/cloudflare-one/applications/>
@@ -453,6 +517,16 @@ Important tables:
 - `settings`: application-level settings.
 
 Keep workflow metadata as JSON only for fields that are naturally flexible, such as `required_secrets`, `triggers`, and `params_schema`. Keep operational fields such as enabled state and runtime as typed columns.
+
+Always use prepared statements for operator-controlled filters and search:
+
+```ts
+const rows = await env.DB.prepare(
+  'SELECT * FROM runs WHERE script_id = ? AND status = ? ORDER BY started_at DESC LIMIT 50'
+).bind(scriptId, status).all();
+```
+
+Never interpolate user input into SQL strings, including `ORDER BY`, date filters, and search terms. Map sort/filter options through an allow-list before building a query.
 
 ## Workflow Runtime Model
 
@@ -716,12 +790,17 @@ interface EmailProvider {
   send(message: {
     to: string[];
     from: string;
+    replyTo?: string;
     subject: string;
     text: string;
     html?: string;
+    tags?: Record<string, string>;
+    idempotencyKey?: string;
   }): Promise<void>;
 }
 ```
+
+For v1, delivery can be fire-and-forget after the provider accepts the message. If bounced email, complaint handling, or inbound replies matter, add provider-specific webhook receivers and store delivery events in D1 with the provider name, provider message id, event type, and timestamp.
 
 Setup pattern:
 
@@ -889,6 +968,18 @@ Recommended flow:
 
 Never allow pasted LLM output to deploy directly to production without containment checks and CI.
 
+Concrete paste-back limits:
+
+- Max single file size: 200 KB.
+- Max total payload size: 1 MB.
+- Allowed extensions: `.ts`, `.json`, `.md`, `.sql`, and `.txt`.
+- Allowed root: `scripts/{workflow_id}/` only, unless an administrator explicitly starts a global edit job.
+- Reject absolute paths, `..`, symlinks, NUL bytes, and files with binary extensions.
+- Reject `.env`, `.dev.vars`, `.pem`, `.key`, `.p12`, `.pfx`, `.sqlite`, `.db`, screenshots, archives, and generated logs.
+- Reject these code patterns in workflow edits unless a human administrator overrides them after review: `eval(`, `new Function(`, `child_process`, `node:child_process`, `require('fs')`, `require("fs")`, `node:fs`, non-literal dynamic imports, and writes outside the workflow directory.
+- Reject new dependencies in workflow paste-back by default. Dependency changes should go through a normal PR.
+- Run the secret scanner and workflow tests before creating or updating the PR.
+
 ## Security Requirements
 
 Implement these from day one:
@@ -904,6 +995,17 @@ Implement these from day one:
 - Validate all JSON payloads.
 - Use idempotency keys for writes to external systems.
 - Avoid storing raw personal data unless required.
+
+Starter security headers for server-rendered HTML:
+
+```http
+Content-Security-Policy: default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; form-action 'self'; upgrade-insecure-requests
+Referrer-Policy: no-referrer
+X-Content-Type-Options: nosniff
+Permissions-Policy: camera=(), microphone=(), geolocation=()
+```
+
+Avoid `unsafe-eval`. Use nonces or external bundled scripts if inline JavaScript grows beyond tiny progressive-enhancement handlers.
 
 ## Testing Checklist
 
@@ -942,8 +1044,10 @@ Use GitHub Actions:
 - install dependencies with `npm ci`
 - run typecheck
 - run tests
-- run secret scan
+- run secret scan with `bash scripts/scan-secrets.sh .`
 - optionally run Wrangler deploy on main
+
+Use [examples/ci.example.yml](examples/ci.example.yml) as the starting workflow. Copy it to `.github/workflows/ci.yml` in the generated app.
 
 Deployment options:
 
@@ -963,10 +1067,12 @@ Do not store third-party service credentials in GitHub Actions unless CI actuall
 Before making the repo public:
 
 ```bash
-rg -n -i "api[_-]?key|secret|token|private key|password|bearer|authorization|client_secret|refresh_token|access_token" .
-rg -n -i "private-org-name|private-domain|private-email|private-client-name" .
+bash scripts/scan-secrets.sh .
+PRIVATE_PATTERNS='(private-org-name|private-domain|private-email|private-client-name)' bash scripts/scan-secrets.sh .
 git status --short
 ```
+
+The script works with `rg` when available and falls back to `grep`. For stronger coverage, add a dedicated scanner such as Gitleaks or TruffleHog in CI, but keep this script as the fast local baseline.
 
 Also inspect:
 

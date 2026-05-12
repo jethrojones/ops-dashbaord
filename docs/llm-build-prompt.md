@@ -77,18 +77,22 @@ Security requirements:
 - never log secret values
 - redact tokens and known secret values from logs
 - keep dashboard auth deny-by-default
+- verify Cloudflare Access JWTs from Cf-Access-Jwt-Assertion using the Access JWKS endpoint; do not trust identity headers without JWT verification
 - verify webhook raw bodies before parsing when the provider requires it
 - use idempotency keys for external writes
 - use Durable Objects, not KV, for locks and deduplication
 - do not store full run logs in D1
 - do not allow LLM paste-back files outside scripts/{workflow_id}/
-- reject path traversal, binary files, .env files, private keys, and eval-like code in paste-back
+- reject path traversal, binary files, .env files, private keys, eval-like code, filesystem/child-process access, oversized files, and non-allowed extensions in paste-back
+- use prepared D1 statements with bind values; never interpolate operator input into SQL
+- encrypt service credentials with AES-GCM using a unique IV per value and store the IV separately from ciphertext
 
 Cloudflare setup:
 - create D1 database with npx wrangler d1 create ops-dashboard
 - create R2 bucket with npx wrangler r2 bucket create ops-dashboard-logs
 - create KV namespace with npx wrangler kv namespace create CACHE
 - create Queue with npx wrangler queues create ops-dashboard-dispatch
+- create DLQ with npx wrangler queues create ops-dashboard-dispatch-dlq
 - configure Durable Object migrations
 - configure cron triggers in wrangler.toml
 - set Worker Secrets with npx wrangler secret put
@@ -107,8 +111,10 @@ Write tests before claiming completion:
 - queue consumer records failure, categorizes error, sends notification, writes R2 log
 - secret redaction removes exact values and token patterns
 - paste-back validator rejects path traversal and out-of-scope files
+- paste-back validator rejects forbidden code patterns and oversized files
+- script secret scan passes with bash scripts/scan-secrets.sh .
 - D1 migrations apply locally
 - typecheck passes
 
-Use README.md as the product and setup specification. Use examples/wrangler.example.toml and examples/schema.example.sql as sanitized starting points. When resource ids are needed, tell me to run Wrangler commands and paste the generated ids into local config. Do not create fake real-looking keys.
+Use README.md as the product and setup specification. Use examples/wrangler.example.toml, examples/schema.example.sql, examples/package.example.json, examples/tsconfig.example.json, and examples/ci.example.yml as sanitized starting points. When resource ids are needed, tell me to run Wrangler commands and paste the generated ids into local config. Do not create fake real-looking keys.
 ```
