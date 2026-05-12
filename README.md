@@ -443,6 +443,134 @@ Add rate limiting at three levels:
 
 Every workflow that writes to an external system should include an idempotency key derived from `run_id`, external object id, and action name.
 
+## One-Shot Non-Interactive Setup
+
+The guide is designed for one-shot application scaffolding by an LLM. A true one-shot provision-and-deploy run is possible only if the human first gives the agent all external account prerequisites. Cloudflare, GitHub, email providers, and identity providers still have account-level objects that cannot be safely invented by the app.
+
+Use this path when you want an agent to build, provision, and deploy without stopping for browser login prompts or copy/paste steps.
+
+### What The Human Must Provide First
+
+Create these outside the repo and give the values to the agent through a secure local secrets file, password manager CLI, CI secret store, or environment variables. Do not paste real values into source files or commit them.
+
+Cloudflare:
+
+- `CLOUDFLARE_ACCOUNT_ID`: the target Cloudflare account id.
+- `CLOUDFLARE_API_TOKEN`: an API token for automation. Minimum practical permissions for this app are account-level Workers Scripts Edit, D1 Edit, Workers KV Storage Edit, Workers R2 Storage Edit, Queues Edit, and Workers Tail Read if logs are needed. Add zone-level Workers Routes Edit, Zone Read, and DNS Edit only if the agent will attach routes or DNS records for a real hostname.
+- R2 enabled on the account before bucket creation.
+- A Cloudflare zone already added for the real domain, such as `example.com`.
+- The intended dashboard hostname, such as `ops.example.com`.
+- A Cloudflare Access application and policy already created for that hostname, or an explicit instruction that the agent may create it through the Cloudflare API if the token has Zero Trust or Access edit permissions.
+- `CF_TEAM_DOMAIN`, for example the `<team-name>` part of `https://<team-name>.cloudflareaccess.com`.
+- `CF_ACCESS_AUD`, copied from the Cloudflare Access application.
+
+Application secrets:
+
+- `OPS_SECRETS_MASTER_KEY`: a random 32-byte base64 value. Generate with `openssl rand -base64 32`.
+- `EMAIL_PROVIDER_API_KEY`: a test or production email-provider key.
+- `GITHUB_APP_ID`, `GITHUB_INSTALLATION_ID`, and `GITHUB_APP_PRIVATE_KEY`, if the app will create branches or PRs.
+- Any provider-specific webhook secrets or API keys needed by initial workflows.
+
+Other vendor prerequisites:
+
+- GitHub App created and installed on the target repository if the LLM edit loop should work on day one.
+- Email sending domain verified with the provider. DNS verification can take time and is not reliable as a single command.
+- OAuth client ids, client secrets, service account JSON, or private app tokens for services the initial workflows need.
+- Answers to the design questions, or an explicit instruction: "Use Glassline defaults and do not stop for design input."
+
+### How To Hand Values To The Agent
+
+For local one-shot setup, create an untracked file named `.setup.env`:
+
+```dotenv
+CLOUDFLARE_ACCOUNT_ID="replace-with-account-id"
+CLOUDFLARE_API_TOKEN="replace-with-cloudflare-api-token"
+APP_DOMAIN="ops.example.com"
+CF_TEAM_DOMAIN="example-team"
+CF_ACCESS_AUD="replace-with-access-audience"
+EMAIL_FROM="ops@example.com"
+EMAIL_PROVIDER_API_KEY="replace-with-email-provider-key"
+OPS_SECRETS_MASTER_KEY="replace-with-openssl-rand-base64-32-output"
+GITHUB_APP_ID="replace-with-github-app-id"
+GITHUB_INSTALLATION_ID="replace-with-github-installation-id"
+GITHUB_APP_PRIVATE_KEY="replace-with-base64-encoded-private-key"
+```
+
+Add project-specific service credentials only if the first workflows require them. Keep `.setup.env`, `.dev.vars`, `.env.production`, and `secrets.json` out of Git.
+
+The agent can then run:
+
+```bash
+set -a
+source .setup.env
+set +a
+
+npm ci
+
+npx wrangler d1 create ops-dashboard
+npx wrangler r2 bucket create ops-dashboard-logs
+npx wrangler kv namespace create CACHE
+npx wrangler queues create ops-dashboard-dispatch
+npx wrangler queues create ops-dashboard-dispatch-dlq
+```
+
+The agent should parse Wrangler output and update `wrangler.toml` automatically:
+
+- write the D1 `database_id` into `[[d1_databases]].database_id`
+- write the KV namespace `id` into `[[kv_namespaces]].id`
+- keep bucket and queue names aligned with `examples/wrangler.example.toml`
+- set `APP_DOMAIN`, `CF_TEAM_DOMAIN`, sender email, repository owner, and repository name in `[vars]`
+- update `compatibility_date` to the scaffold date only after running the tests on that date
+
+For Worker secrets, prefer bulk upload from an untracked generated file:
+
+```bash
+cat > .secrets.production.json <<'JSON'
+{
+  "OPS_SECRETS_MASTER_KEY": "replace-at-runtime",
+  "CF_ACCESS_AUD": "replace-at-runtime",
+  "EMAIL_PROVIDER_API_KEY": "replace-at-runtime",
+  "GITHUB_APP_PRIVATE_KEY": "replace-at-runtime",
+  "GITHUB_APP_ID": "replace-at-runtime",
+  "GITHUB_INSTALLATION_ID": "replace-at-runtime"
+}
+JSON
+
+npx wrangler secret bulk .secrets.production.json
+```
+
+An agent should create `.secrets.production.json` by reading environment variables, not by writing real values into a committed template. For a single secret, piped input also works:
+
+```bash
+printf '%s' "$CF_ACCESS_AUD" | npx wrangler secret put CF_ACCESS_AUD
+```
+
+After resources and secrets exist, the one-shot path can continue:
+
+```bash
+npx wrangler d1 migrations apply ops-dashboard --local
+npx wrangler d1 migrations apply ops-dashboard --remote
+npm run typecheck
+npm test
+bash scripts/scan-secrets.sh .
+npx wrangler deploy
+```
+
+### What Still Cannot Be Truly One-Shot
+
+These steps are external trust or account setup tasks. They must be completed before the agent can run unattended:
+
+- Creating a Cloudflare account or adding a paid feature that requires dashboard acceptance.
+- Enabling R2 for the first time if the account requires UI confirmation.
+- Adding a domain to Cloudflare and waiting for nameserver or DNS propagation.
+- Creating or approving a Cloudflare Access identity provider and policy, unless the API token has the needed Zero Trust permissions and the organization already exists.
+- Creating a GitHub App, installing it on a repository, and downloading its private key.
+- Verifying an email sending domain and waiting for DNS verification.
+- Creating third-party OAuth apps, service accounts, or private app tokens.
+- Answering design questions, unless the user explicitly authorizes Glassline defaults.
+
+If any of those values are missing, the correct agent behavior is to stop and ask for the missing value rather than inventing one or disabling the feature.
+
 ## Example Cloudflare Setup Order
 
 Run these from the project root after the app is scaffolded:

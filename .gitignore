@@ -1,6 +1,8 @@
 node_modules/
 .wrangler/
 .dev.vars
+.setup.env
+.secrets*.json
 .env
 .env.*
 !.env.example

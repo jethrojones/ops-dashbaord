@@ -88,6 +88,8 @@ Security requirements:
 - encrypt service credentials with AES-GCM using a unique IV per value and store the IV separately from ciphertext
 
 Cloudflare setup:
+- if CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, CF_ACCESS_AUD, APP_DOMAIN, email secrets, and GitHub App secrets are already available, follow README.md "One-Shot Non-Interactive Setup" and do not stop for browser login
+- if those values are missing, stop and ask for the missing prerequisites instead of inventing them or disabling auth
 - create D1 database with npx wrangler d1 create ops-dashboard
 - create R2 bucket with npx wrangler r2 bucket create ops-dashboard-logs
 - create KV namespace with npx wrangler kv namespace create CACHE
